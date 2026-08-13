@@ -1,5 +1,5 @@
 #!/bin/sh
-# replicator: pushes recordings to the backup as the source instance reports them
+# replicator: pushes files to the backup as the source instance reports them
 # (event-daemon.py), and reconciles whatever that missed on an interval. Email
 # notifications are sent directly from this container (msmtp).
 #
@@ -102,7 +102,7 @@ ensure_daemon() {
 fail_count=0
 last_alert=0
 daemon_pid=""
-echo "replicator starting; interval=${INTERVAL}s min_age=${MIN_AGE} src=${SRC} dst=${DST}"
+echo "[$(now_utc)] replicator starting; interval=${INTERVAL}s min_age=${MIN_AGE} src=${SRC} dst=${DST}"
 ensure_daemon
 
 while true; do
@@ -125,9 +125,9 @@ while true; do
   echo "[$ts] sweep start"
   : > "$missing"; : > "$differ"; : > "$list"
   # Phase 1 -- ask which files the backup lacks or holds at a different size.
-  # --size-only: footage is write-once/immutable, and a delivered file carries
+  # --size-only: uploads are write-once/immutable, and a delivered file carries
   # its own mtime, so a size+mtime compare would re-copy every large file that
-  # arrived fine. Size uniquely identifies a complete clip.
+  # arrived fine. Size uniquely identifies a complete file.
   { rclone check "$SRC" "$DST" --one-way --min-age "$MIN_AGE" --size-only \
       --missing-on-dst "$missing" --differ "$differ" --checkers 8 \
       --log-level NOTICE 2>&1; echo $? >/tmp/rc; } | tee "$log"
@@ -201,21 +201,21 @@ daemon did with one of them:
       echo "[$ts] sweep ok in ${elapsed}s; nothing new to copy (${false_pos} listing artefact(s))"
     fi
     # Reap pre-rename leftovers: SFTPGo's realtime push can land the pre-rename
-    # name on the backup when the hub's rename beat the push (see reap-orphans.py
+    # name on the backup when a rename beat the push (see reap-orphans.py
     # for the deletion criteria -- it only removes a duplicate whose renamed twin
-    # exists on both sides with the same size, never footage local retention pruned).
+    # exists on both sides with the same size, never files the source's retention pruned).
     reap_out="$(python3 /reap-orphans.py 2>&1)"
-    printf '%s\n' "$reap_out" | sed "s/^/[$ts] reap: /"
-    reaped="$(printf '%s\n' "$reap_out" | grep -c '^orphan ')"
+    printf '%s\n' "$reap_out"          # it stamps its own lines, same format
+    reaped="$(printf '%s\n' "$reap_out" | grep -c ' reap: orphan ')"
     if [ "${reaped:-0}" -gt 0 ]; then
       send_mail "${SUBJECT_PREFIX} ${reaped} pre-rename duplicate(s) deleted" "Deleted pre-rename duplicates on the backup.
 Time: ${ts}
 Target: ${DST}
 
-$(printf '%s\n' "$reap_out" | grep '^orphan ')
+$(printf '%s\n' "$reap_out" | grep ' reap: orphan ')
 
 Each deleted file had a byte-identical renamed twin present on both the source and
-the backup; footage the local retention has pruned is never touched."
+the backup; files the source's retention has pruned are never touched."
     fi
   else
     fail_count=$(( fail_count + 1 ))

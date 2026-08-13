@@ -1,53 +1,62 @@
 # ftp-replicator
 
-Replicates recorder footage from one SFTPGo instance to another, driven by SFTPGo's event
-actions, with rclone doing all of the copying.
+Replicates files from one SFTPGo instance to another, driven by SFTPGo's event actions,
+with rclone doing all of the copying.
 
 Extracted from a working deployment. Everything site-specific (paths, hosts, credentials)
 is an environment variable, so replicating it is a matter of filling in `.env`.
 
 ## The setup
 
-```
-   recorder (FTP client)
-        |  uploads <camera>_<YYYYmmddHHMMSS>.mp4, then renames it ~1-2s later
-        v
-   SFTPGo  "source"            event actions (HTTP)        this repo
-   - FTP in                ----------------------------->  event-daemon.py
-   - data retention                                          |  rclone
-        |                                                    v
-        |                                              SFTPGo  "backup"
-        |                                              - SFTP in
-        `--- replicator.sh sweep (rclone, every 5 min) ---> (same target)
+```mermaid
+flowchart TD
+    client["Uploading client<br/><small>writes a file, then renames it ~1-2s later</small>"]
+    source["SFTPGo &quot;source&quot;<br/><small>ingest + its own data retention</small>"]
+    daemon["event-daemon.py<br/><small>consolidates events, then calls rclone</small>"]
+    sweep["replicator.sh<br/><small>reconciliation sweep, every SYNC_INTERVAL</small>"]
+    backup["SFTPGo &quot;backup&quot;<br/><small>keeps everything</small>"]
+
+    client -->|FTP| source
+    source -->|"HTTP event action, per upload and rename"| daemon
+    source -.->|"read-only mount"| sweep
+    daemon -->|rclone| backup
+    sweep -->|"rclone, only what the daemon missed"| backup
+    sweep -.->|"email report"| inbox["your inbox"]
+
+    subgraph repo ["this repo"]
+        daemon
+        sweep
+    end
 ```
 
-Two independent paths write to the backup, and only these two:
+Two paths write to the backup, and only these two:
 
 * **event-daemon.py** — the normal path. SFTPGo POSTs every upload and rename to it; it
-  pushes the clip within seconds.
+  pushes the file within seconds.
 * **replicator.sh** — the safety net, every `SYNC_INTERVAL`. Copies whatever the daemon
   missed (crash, restart, failed call, backup offline) and emails a report when it finds
   anything. **An email therefore means the event path dropped one** — that is the signal;
   the daemon itself never mails.
 
-The source instance keeps a short local retention (SFTPGo's own data-retention rule); the
-backup keeps everything. So the backup is deliberately **not** a mirror, and nothing here
-ever deletes on the backup except `reap-orphans.py` (below) and the scoped `sync` of a
-renamed clip's old names.
+The source instance keeps a short retention (SFTPGo's own data-retention rule); the backup
+keeps everything. So the backup is deliberately **not** a mirror, and nothing here ever
+deletes on the backup except `reap-orphans.py` (below) and the scoped `sync` that clears a
+renamed file's old names.
 
 ## Why it is built this way
 
 Two failure modes drove the design. Both are easy to re-introduce if you simplify it.
 
-**1. The recorder renames a clip while the transfer is still open.** Observed repeatedly:
-the rename event arrives ~130 ms *before* the transfer closes. So a rename event on its
-own says nothing about whether the file is complete, and any scheme that copies on rename
-can publish a short file. Only the *upload* event proves completion — SFTPGo fires it
-after the transfer closes.
+**1. The client renames a file while its transfer is still open.** Observed repeatedly:
+the rename event arrives ~130 ms *before* the transfer closes, because the rename comes in
+on a second connection while the first is still writing. So a rename event says nothing
+about whether the file is complete, and any scheme that copies on rename can publish a
+short file. Only the *upload* event proves completion — SFTPGo fires it after the transfer
+closes.
 
-That is why the daemon buffers: events for one clip accumulate, keyed by the file (a
+Hence the consolidation buffer: events for one file accumulate, keyed by the file (a
 rename joins the entry its *source* name belongs to, so `A→B→C` stays one entry), and the
-entry is released only when it holds an upload event **and** has been quiet for
+entry is released only once it holds an upload event **and** has been quiet for
 `SYNC_QUIET_PERIOD`. The last rename target wins; every earlier name is deleted from the
 backup, in case a partial copy of one got there.
 
@@ -72,10 +81,12 @@ are logged and skipped; only real misses are copied and mailed.
 | `reap-orphans.py` | Deletes pre-rename duplicates on the backup (see below) |
 | `test_event_daemon.py` | `python3 test_event_daemon.py` — asserts only, no framework, no network |
 
-`reap-orphans.py` exists for clips the event path did not settle: it removes a backup file
-only when it has no counterpart locally, a sibling within ±2 s exists on **both** sides,
-and that sibling has the same size on both. It never touches footage the local retention
-merely aged out.
+`reap-orphans.py` is for files the event path did not settle. It assumes names of the form
+`<prefix>_<YYYYmmddHHMMSS>.<ext>` in per-date directories, and a client that renames by
+shifting that timestamp a second or two. It removes a file from the backup only when it
+has no counterpart on the source, a sibling within ±2 s exists on **both** sides, and that
+sibling has the same size on both — so files the source's retention merely aged out are
+never touched.
 
 ## Configuration
 
@@ -83,19 +94,21 @@ All via environment (`.env`, see `.env.example`).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `RCLONE_CONFIG_BACKUP_TYPE` … | — | rclone remote named `backup:`, defined entirely by env vars |
-| `RCLONE_CONFIG_BACKUP_KNOWN_HOSTS_FILE` | — | path to a known_hosts file; without it rclone does no host-key validation |
-| `SYNC_SRC` | `/data/source` | local root, read-only mount of the source instance's data dir |
+| `RCLONE_CONFIG_BACKUP_*` | — | the rclone remote named `backup:`, defined entirely by env vars |
+| `RCLONE_CONFIG_BACKUP_KNOWN_HOSTS_FILE` | — | known_hosts path; without it rclone does no host-key validation |
+| `SYNC_SRC` | `/data/source` | read-only mount of the source instance's data directory |
 | `SYNC_DEST` | `backup:` | rclone remote |
 | `SYNC_DAEMON_PORT` | `8787` | daemon listen port; publish it on loopback only |
 | `SYNC_QUIET_PERIOD` | `2` | seconds of silence before an entry is released |
 | `SYNC_FLUSH_INTERVAL` | `1` | how often the buffer is checked |
-| `SYNC_MAX_ENTRY_AGE` | `290` | give-up point; **must stay below the sweep's `--min-age`** |
+| `SYNC_MAX_ENTRY_AGE` | `290` | give-up point; **must stay below the sweep's `MIN_AGE`** |
 | `SYNC_RCLONE_TIMEOUT` | `900` | per-invocation timeout |
 | `SYNC_INTERVAL` | `300` | seconds between sweeps |
 | `MIN_AGE` | `5m` | sweep ignores files younger than this |
-| `REAP_SRC` / `REAP_REMOTE` | `/data/source`, `backup:/` | must point at the directory that directly contains the day directories |
+| `REAP_SRC` / `REAP_REMOTE` | `/data/source`, `backup:/` | must point at the directory that *directly* contains the date directories |
+| `REAP_DAYS` | `2` | how many recent date directories to scan; `0` scans all |
 | `SMTP_*`, `MAIL_FROM`, `MAIL_TO` | — | msmtp settings for the sweep's reports |
+| `MAIL_SUBJECT_PREFIX` | `[replicator]` | subject prefix for those reports |
 
 ## Wiring the source SFTPGo
 
@@ -120,14 +133,15 @@ Gotchas found the hard way:
   `updated_at` or nothing reloads.
 * Until that reload happens the old actions keep running from cache. If an old action
   wrote into a virtual folder you just deleted, the path resolves to a **real** directory
-  and it starts filling your source tree. Change the rules first, drop the folder second.
+  and it quietly starts filling the source tree. Change the rules first, drop the folder
+  second.
 
 ## Deploying
 
 Any runtime that gives you rclone + python3, a read-only mount of the source data
 directory, and a port SFTPGo can reach. `examples/compose.yaml` is one way, not a
-requirement; `replicator.sh` is the entrypoint and starts the daemon itself (and
-restarts it if it dies).
+requirement; `replicator.sh` is the entrypoint and starts the daemon itself (and restarts
+it if it dies).
 
 ## Operating it
 
@@ -135,12 +149,13 @@ restarts it if it dies).
 # is it alive, and is anything stuck?
 wget -qO- http://127.0.0.1:8787/health          # buffered=<n> queued=<n>
 
-# what happened to one clip? (after a sweep email)
-docker logs <container> 2>&1 | grep '<file name>'
+# what happened to one file? (after a sweep email)
+<your log viewer for this container> | grep '<file name>'
 
 # do the two sides actually agree?
 rclone check "$SYNC_SRC" backup:/ --one-way --min-age 5m --size-only
 ```
 
-Every event, decision and rclone invocation is logged with the file name in it, which is
-what makes a sweep email actionable rather than alarming.
+Every log line is `[<ISO-8601 UTC>] <component>: <message>` with the file name in it, which
+is what makes a sweep email actionable rather than alarming. (rclone's own output keeps its
+`2006/01/02 15:04:05` format; that one is not ours to set.)

@@ -15,7 +15,7 @@ services:
       - .env
     volumes:
       # The source instance's data directory, read-only: the replicator only reads.
-      - /srv/footage:/data/source:ro
+      - /srv/uploads:/data/source:ro
       - ./replicator.sh:/replicator.sh:ro
       - ./event-daemon.py:/event-daemon.py:ro
       - ./reap-orphans.py:/reap-orphans.py:ro

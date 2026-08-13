@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Push recordings to the backup as SFTPGo reports them, using rclone.
+"""Push files to the backup as SFTPGo reports them, using rclone.
 
 SFTPGo fires an HTTP action per upload and per rename; this daemon turns those
 into rclone calls. It is deliberately disposable: no persistence, no retries, no
@@ -9,7 +9,7 @@ is the signal that something here missed one -- so every event, decision and
 rclone invocation is logged, greppable by file name.
 
 Endpoints (POST, JSON body):
-    /upload   {"path": "/<tree>/<day>/<clip>"}
+    /upload   {"path": "/<dir>/<file>"}
     /rename   {"path": "<old>", "target": "<new>"}
     /health   GET -> buffer and queue depth
 
@@ -18,10 +18,10 @@ rename joins the entry its source name belongs to, so a chain A->B->C stays one
 entry). An entry is released to the rclone queue once it holds an upload event
 AND nothing has arrived for it in QUIET seconds:
 
-  - the upload event is what proves the transfer finished. The hub renames a
-    clip a second or two after uploading it, sometimes while the transfer is
+  - the upload event is what proves the transfer finished. The client renames a
+    file a second or two after uploading it, sometimes while the transfer is
     still open, so a rename on its own says nothing about completeness;
-  - the rename events are what say where the clip ended up. The last target
+  - the rename events are what say where the file ended up. The last target
     wins; every earlier name is deleted from the backup, in case a partial copy
     of one got there.
 
@@ -53,7 +53,7 @@ Job = collections.namedtuple("Job", "final olds")
 
 
 def log(msg):
-    print("%s daemon: %s" % (time.strftime("%FT%TZ", time.gmtime()), msg), flush=True)
+    print("[%s] daemon: %s" % (time.strftime("%FT%TZ", time.gmtime()), msg), flush=True)
 
 
 class RcloneRunner:
@@ -70,10 +70,10 @@ class RcloneRunner:
 
 
 class Entry:
-    """Everything heard about one clip inside the consolidation window."""
+    """Everything heard about one file inside the consolidation window."""
 
     def __init__(self, name, now):
-        self.final = name          # where the clip is expected to be, so far
+        self.final = name          # where the file is expected to be, so far
         self.olds = []             # names it has been known by, oldest first
         self.uploaded = False      # an upload event arrived: transfer finished
         self.first_seen = now
@@ -91,7 +91,7 @@ class Daemon:
         self.clock = clock or time.time
         self.quiet = QUIET
         self.max_age = MAX_AGE
-        self._entries = {}         # keyed by the name the clip was first seen as
+        self._entries = {}         # keyed by the name the file was first seen as
         self._index = {}           # every name it has had -> that key
         self._lock = threading.Lock()
         self._queue = []
