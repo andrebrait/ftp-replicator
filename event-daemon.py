@@ -76,10 +76,11 @@ class RcloneRunner:
         out = subprocess.run([RCLONE] + argv, capture_output=True, text=True, timeout=TIMEOUT)
         elapsed = time.time() - started
         if out.returncode != 0:
-            log("rclone rc=%d in %.1fs: %s | %s" %
-                (out.returncode, elapsed, " ".join(argv), out.stderr.strip()[-300:]))
+            log("rclone failed", level="error", event="rclone", rc=out.returncode,
+                elapsed_ms=round(elapsed * 1000), argv=argv,
+                stderr=out.stderr.strip()[-300:])
             return False
-        log("rclone ok in %.1fs: %s" % (elapsed, " ".join(argv)))
+        log("rclone ok", event="rclone", rc=0, elapsed_ms=round(elapsed * 1000), argv=argv)
         return True
 
 
@@ -155,7 +156,7 @@ class Daemon:
             key, entry = self._entry_for(rel, now)
             entry.uploaded = True
             entry.last_event = now
-            log("upload event: %s (expecting %s)" % (rel, entry.final))
+            log("upload event", event="upload", path=rel, expecting=entry.final)
 
     def on_rename(self, vpath, target):
         old = self.rel(vpath)
@@ -168,7 +169,8 @@ class Daemon:
                 entry.final = new
             self._index[new] = key
             entry.last_event = now
-            log("rename event: %s -> %s (upload seen: %s)" % (old, new, entry.uploaded))
+            log("rename event", event="rename", path=old, target=new,
+                upload_seen=entry.uploaded)
 
     def ready_jobs(self):
         """Entries that hold an upload event and have gone quiet. Stale ones
@@ -185,8 +187,8 @@ class Daemon:
                 jobs.append(Job(entry.final, tuple(entry.olds)))
                 self._forget(key, entry)
         for key, entry in stale:
-            log("discarding %s after %.0fs with no upload event, the sweep takes it from here"
-                % (key, self.max_age))
+            log("discarded with no upload event, the sweep takes it from here",
+                level="warn", event="discard", path=key, age_s=round(self.max_age))
             with self._lock:
                 self._forget(key, entry)
         return jobs
@@ -206,14 +208,12 @@ class Daemon:
     def push(self, job):
         with self._cv:
             if job in self._queue:
-                log("already queued, skipping: %s" % (job.final,))
+                log("already queued", event="queue_skip", path=job.final)
                 return
             self._queue.append(job)
             self._cv.notify()
-        log("queued %s%s (depth %d)" %
-            (job.final,
-             " (replacing %s)" % ", ".join(job.olds) if job.olds else "",
-             len(self._queue)))
+        log("queued", event="queued", path=job.final, replacing=list(job.olds),
+            depth=len(self._queue))
 
     def pop(self, timeout=None):
         with self._cv:
@@ -227,12 +227,14 @@ class Daemon:
         try:
             self._run(job)
         except Exception as exc:                      # noqa: BLE001 - the sweep is the net
-            log("FAILED %s: %s: %s" % (job.final, type(exc).__name__, exc))
+            log("job failed", level="error", event="job_error", path=job.final,
+                error="%s: %s" % (type(exc).__name__, exc))
 
     def _run(self, job):
         local = os.path.join(self.src, job.final)
         if not os.path.exists(local):
-            log("gone locally before we pushed it, leaving it to the sweep: %s" % job.final)
+            log("gone locally before we pushed it, leaving it to the sweep",
+                level="warn", event="skip_missing", path=job.final)
             return
         day = os.path.dirname(job.final)
         cross_dir = [o for o in job.olds if os.path.dirname(o) != day]
@@ -261,7 +263,8 @@ class Daemon:
                 for job in self.ready_jobs():
                     self.push(job)
             except Exception as exc:                  # noqa: BLE001 - keep flushing
-                log("flush error: %s: %s" % (type(exc).__name__, exc))
+                log("flush error", level="error", event="flush_error",
+                    error="%s: %s" % (type(exc).__name__, exc))
 
     def consume(self):
         while True:
@@ -292,7 +295,8 @@ def make_handler(daemon):
             try:
                 body = json.loads(raw) if raw else {}
             except ValueError:
-                log("bad request body on %s: %r" % (self.path, raw[:200]))
+                log("bad request body", level="warn", event="bad_request",
+                    endpoint=self.path, body=raw[:200])
                 return self._reply(400, "bad json\n")
             try:
                 if self.path.startswith("/upload"):
@@ -302,10 +306,12 @@ def make_handler(daemon):
                 else:
                     return self._reply(404)
             except ValueError as exc:
-                log("rejected %s: %s" % (self.path, exc))
+                log("rejected", level="warn", event="rejected",
+                    endpoint=self.path, error=str(exc))
                 return self._reply(400, "bad path\n")
             except Exception as exc:                  # noqa: BLE001 - never 500 at SFTPGo
-                log("error handling %s %r: %s: %s" % (self.path, body, type(exc).__name__, exc))
+                log("error handling request", level="error", event="handler_error",
+                    endpoint=self.path, error="%s: %s" % (type(exc).__name__, exc))
             self._reply(200, "ok\n")
 
         def log_message(self, format, *args):
@@ -319,8 +325,8 @@ def main():
     threading.Thread(target=daemon.flush_loop, daemon=True).start()
     threading.Thread(target=daemon.consume, daemon=True).start()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(daemon))
-    log("listening on :%d, src=%s dest=%s quiet=%.1fs" %
-        (PORT, daemon.src, daemon.dest, daemon.quiet))
+    log("listening", event="start", port=PORT, src=daemon.src, dest=daemon.dest,
+        quiet_s=daemon.quiet, max_entry_age_s=round(daemon.max_age))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -14,6 +14,7 @@ A file on the backup is deleted only when ALL of these hold:
   - that sibling has the same size on both sides.
 Anything else (e.g. files the source's own retention already pruned) is kept.
 """
+import json
 import os
 import re
 import subprocess
@@ -29,8 +30,20 @@ NAME_RE = re.compile(r"^(.+)_(\d{14})(\.\w+)$")
 LSL_RE = re.compile(r"\s*(\d+) \S+ \S+ (.+)$")
 
 
-def log(msg):
-    print("[%s] reap: %s" % (datetime.now(timezone.utc).strftime("%FT%TZ"), msg))
+COMPONENT = "reap"
+LOG_JSON = os.environ.get("LOG_FORMAT", "json").lower() != "text"
+
+
+def log(msg, level="info", **fields):
+    """Same shape as the daemon's: JSON by default, LOG_FORMAT=text for humans."""
+    ts = datetime.now(timezone.utc).strftime("%FT%TZ")
+    if LOG_JSON:
+        record = {"time": ts, "level": level, "component": COMPONENT, "msg": msg}
+        record.update(fields)
+        print(json.dumps(record, sort_keys=False))
+        return
+    extra = " ".join("%s=%s" % (k, v) for k, v in fields.items())
+    print("[%s] %s: %s%s" % (ts, COMPONENT, msg, " " + extra if extra else ""))
 
 
 def remote_sizes(day):
@@ -68,8 +81,9 @@ def main():
             # Nothing can be deleted in this state (every rule needs a local
             # twin), but it means REAP_SRC/REAP_REMOTE are not both pointing at
             # the level that holds the date directories.
-            log("WARNING: %d file(s) on the backup under %s and none locally -- check "
-                "REAP_SRC=%s and REAP_REMOTE=%s" % (len(remote), day, SRC, REMOTE))
+            log("files on the backup but none locally: check REAP_SRC and REAP_REMOTE",
+                level="warn", event="level_mismatch", day=day, remote_files=len(remote),
+                reap_src=SRC, reap_remote=REMOTE)
         for name in sorted(set(remote) - set(local)):
             twin = next((s for s in siblings(name)
                          if s in local and remote.get(s) == local[s]), None)
@@ -77,13 +91,14 @@ def main():
                 kept += 1
                 continue
             path = "%s/%s/%s" % (REMOTE, day, name)
-            log("%sorphan %s/%s (%d bytes, twin %s)" %
-                ("DRY-RUN " if dry else "", day, name, remote[name], twin))
+            log("pre-rename duplicate on the backup",
+                event="orphan_dry_run" if dry else "orphan_deleted",
+                day=day, path=name, size=remote[name], twin=twin)
             if not dry:
                 subprocess.run(RCLONE + ["deletefile", path], check=True, timeout=300,
                                capture_output=True, text=True)
             deleted += 1
-    log("%d orphan(s), %d remote-only file(s) kept" % (deleted, kept))
+    log("reap finished", event="summary", deleted=deleted, kept=kept)
 
 
 if __name__ == "__main__":

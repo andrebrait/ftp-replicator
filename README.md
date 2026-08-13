@@ -123,6 +123,7 @@ All via environment (`.env`, see `.env.example`).
 | `REAP_DAYS` | `2` | how many recent date directories to scan; `0` scans all |
 | `SMTP_*`, `MAIL_FROM`, `MAIL_TO` | — | msmtp settings for the sweep's reports |
 | `MAIL_SUBJECT_PREFIX` | `[replicator]` | subject prefix for those reports |
+| `LOG_FORMAT` | `json` | `json` for one object per line, `text` for `[<ISO-8601 UTC>] <component>: <message>` |
 
 ## Wiring the source SFTPGo
 
@@ -169,6 +170,16 @@ wget -qO- http://127.0.0.1:8787/health          # buffered=<n> queued=<n>
 rclone check "$SYNC_SRC" backup:/ --one-way --min-age 5m --size-only
 ```
 
-Every log line is `[<ISO-8601 UTC>] <component>: <message>` with the file name in it, which
-is what makes a sweep email actionable rather than alarming. (rclone's own output keeps its
-`2006/01/02 15:04:05` format; that one is not ours to set.)
+All three components log one JSON object per line, the same shape SFTPGo uses, so both
+containers filter alike:
+
+```json
+{"time":"2026-08-13T15:15:03Z","level":"info","component":"daemon","msg":"rclone ok",
+ "event":"rclone","rc":0,"elapsed_ms":2947,"argv":["copy","...","--include","/..."]}
+```
+
+The fields are the point — filter on `event` (`upload`, `rename`, `queued`, `rclone`,
+`discard`, `copied`, `listing_artefact`, `sweep_done`, …), `path`, `target`, `rc`,
+`elapsed_ms`. `LOG_FORMAT=text` restores `[<ISO-8601 UTC>] <component>: <message>` if you
+would rather read it directly. rclone's own output keeps its `2006/01/02 15:04:05` format;
+that one is not ours to set.

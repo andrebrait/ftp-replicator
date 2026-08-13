@@ -60,6 +60,39 @@ trap cleanup EXIT INT TERM
 
 now_utc() { date -u +%FT%TZ; }
 
+# log <message> [key=value ...]
+# JSON by default, matching event-daemon.py and reap-orphans.py so both
+# containers can be filtered the same way; LOG_FORMAT=text gives the plain line.
+# The escaping goes through python3 (already required here): file names carry
+# spaces, and quoting them by hand in sh is how these scripts get it wrong.
+log() {
+  if [ "${LOG_FORMAT:-json}" = "text" ]; then
+    _msg="$1"; shift
+    if [ "$#" -gt 0 ]; then
+      echo "[$(now_utc)] replicator: $_msg $*"
+    else
+      echo "[$(now_utc)] replicator: $_msg"
+    fi
+    return
+  fi
+  python3 -c '
+import json, sys
+ts, msg = sys.argv[1], sys.argv[2]
+rec = {"time": ts, "level": "info", "component": "replicator", "msg": msg}
+for pair in sys.argv[3:]:
+    k, _, v = pair.partition("=")
+    if k == "level":
+        rec["level"] = v
+        continue
+    try:
+        v = int(v)
+    except ValueError:
+        pass
+    rec[k] = v
+print(json.dumps(rec, sort_keys=False))
+' "$(now_utc)" "$@"
+}
+
 # rclone will not take a plaintext SFTP password: the value in
 # RCLONE_CONFIG_BACKUP_PASS has to be obscured. Supply either that (already
 # obscured) or BACKUP_PASS_PLAINTEXT, which is obscured here at startup so the
@@ -69,7 +102,7 @@ if [ -z "${RCLONE_CONFIG_BACKUP_PASS:-}" ] && [ -n "${BACKUP_PASS_PLAINTEXT:-}" 
   RCLONE_CONFIG_BACKUP_PASS="$(rclone obscure "$BACKUP_PASS_PLAINTEXT")"
   export RCLONE_CONFIG_BACKUP_PASS
   unset BACKUP_PASS_PLAINTEXT
-  echo "[$(now_utc)] obscured BACKUP_PASS_PLAINTEXT for rclone"
+  log "obscured BACKUP_PASS_PLAINTEXT for rclone" event=obscure_password
 fi
 
 # send_mail SUBJECT BODY [ATTACHMENT_PATH]
@@ -108,13 +141,13 @@ ensure_daemon() {
   fi
   python3 /event-daemon.py &
   daemon_pid=$!
-  echo "[$(now_utc)] event daemon started pid=${daemon_pid}"
+  log "event daemon started" event=daemon_started "pid=${daemon_pid}"
 }
 
 fail_count=0
 last_alert=0
 daemon_pid=""
-echo "[$(now_utc)] replicator starting; interval=${INTERVAL}s min_age=${MIN_AGE} src=${SRC} dst=${DST}"
+log "replicator starting" event=start "interval_s=${INTERVAL}" "min_age=${MIN_AGE}" "src=${SRC}" "dest=${DST}"
 ensure_daemon
 
 while true; do
@@ -124,7 +157,7 @@ while true; do
   # Guard: never run two sweeps at once. mkdir is atomic; the loop is already
   # sequential, so this only trips if something external starts a second sweep.
   if ! mkdir "$LOCK" 2>/dev/null; then
-    echo "[$ts] a sweep is already in progress; skipping this tick"
+    log "a sweep is already in progress, skipping this tick" level=warn event=sweep_skipped
     sleep "$INTERVAL"; continue
   fi
 
@@ -134,7 +167,7 @@ while true; do
   cands=/tmp/candidates.txt
   list=/tmp/copied.txt
   start="$(date +%s)"
-  echo "[$ts] sweep start"
+  log "sweep start" event=sweep_start
   : > "$missing"; : > "$differ"; : > "$list"
   # Phase 1 -- ask which files the backup lacks or holds at a different size.
   # --size-only: uploads are write-once/immutable, and a delivered file carries
@@ -164,14 +197,14 @@ d = json.load(sys.stdin) or {}
 print(d.get("Size", -1))' 2>/dev/null || echo -1)"
       if [ "$rsz" = "$lsz" ]; then
         false_pos=$(( false_pos + 1 ))
-        echo "[$ts] listing called it missing, a direct stat found it at ${rsz} bytes: $rel"
+        log "listing called it missing, a direct stat found it" event=listing_artefact "path=$rel" "size=${rsz}"
         continue
       fi
       if rclone copyto "$SRC/$rel" "$DST$rel" --log-level INFO >> "$log" 2>&1; then
         printf '%s\n' "$rel" >> "$list"
-        echo "[$ts] copied (backup had ${rsz}, source has ${lsz}): $rel"
+        log "copied" event=copied "path=$rel" "backup_size=${rsz}" "source_size=${lsz}"
       else
-        echo "[$ts] copy FAILED: $rel"
+        log "copy failed" level=error event=copy_failed "path=$rel"
       fi
     done < "$cands"
   fi
@@ -208,9 +241,9 @@ daemon did with one of them:
 
   <your log viewer for this container> | grep '<file name>'"
       send_mail "${SUBJECT_PREFIX} ${n} file(s) copied" "$body" "$zipf"
-      echo "[$ts] copied ${n} files (${total} bytes) in ${elapsed}s; report emailed"
+      log "copied files the event path missed, report emailed" event=sweep_done "files=${n}" "bytes=${total}" "elapsed_s=${elapsed}"
     else
-      echo "[$ts] sweep ok in ${elapsed}s; nothing new to copy (${false_pos} listing artefact(s))"
+      log "sweep ok, nothing new to copy" event=sweep_done "files=0" "elapsed_s=${elapsed}" "listing_artefacts=${false_pos}"
     fi
     # Reap pre-rename leftovers: SFTPGo's realtime push can land the pre-rename
     # name on the backup when a rename beat the push (see reap-orphans.py
@@ -218,20 +251,20 @@ daemon did with one of them:
     # exists on both sides with the same size, never files the source's retention pruned).
     reap_out="$(python3 /reap-orphans.py 2>&1)"
     printf '%s\n' "$reap_out"          # it stamps its own lines, same format
-    reaped="$(printf '%s\n' "$reap_out" | grep -c ' reap: orphan ')"
+    reaped="$(printf '%s\n' "$reap_out" | grep -c 'orphan_deleted')"
     if [ "${reaped:-0}" -gt 0 ]; then
       send_mail "${SUBJECT_PREFIX} ${reaped} pre-rename duplicate(s) deleted" "Deleted pre-rename duplicates on the backup.
 Time: ${ts}
 Target: ${DST}
 
-$(printf '%s\n' "$reap_out" | grep ' reap: orphan ')
+$(printf '%s\n' "$reap_out" | grep 'orphan_deleted')
 
 Each deleted file had a byte-identical renamed twin present on both the source and
 the backup; files the source's retention has pruned are never touched."
     fi
   else
     fail_count=$(( fail_count + 1 ))
-    echo "[$ts] sweep FAILED rc=${rc} in ${elapsed}s (streak=${fail_count})"
+    log "sweep failed" level=error event=sweep_failed "rc=${rc}" "elapsed_s=${elapsed}" "streak=${fail_count}"
     now="$(date +%s)"
     if [ "$fail_count" -ge "$FAIL_THRESHOLD" ] && [ $(( now - last_alert )) -ge "$ALERT_MIN_GAP" ]; then
       body="Replication FAILED.
@@ -246,9 +279,9 @@ Sweep interval: ${INTERVAL}s
 $(tail -n 30 "$log")"
       send_mail "${SUBJECT_PREFIX} FAILED (rc=${rc}, ${fail_count} in a row)" "$body" ""
       last_alert="$now"
-      echo "[$ts] failure alert emailed"
+      log "failure alert emailed" event=alert_sent
     fi
   fi
-  echo "[$ts] next sweep in ${INTERVAL}s"
+  log "next sweep scheduled" event=sweep_wait "interval_s=${INTERVAL}"
   sleep "$INTERVAL"
 done
