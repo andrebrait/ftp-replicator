@@ -1,4 +1,4 @@
-# Example only -- one way to run the replicator, not a requirement. Anything that
+# One way to run the replicator, not a requirement. Anything that
 # provides rclone + python3, a read-only mount of the source data directory, and a
 # port the source SFTPGo can reach will do.
 #
@@ -26,13 +26,3 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     entrypoint: ["/bin/sh", "/replicator.sh"]
-
-# rclone needs the SFTP password OBSCURED, never plaintext. Either put an already
-# obscured value in RCLONE_CONFIG_BACKUP_PASS, or keep the plaintext in
-# BACKUP_PASS_PLAINTEXT and obscure it at startup by prefixing the entrypoint with:
-#
-#   export RCLONE_CONFIG_BACKUP_PASS="$(rclone obscure "$BACKUP_PASS_PLAINTEXT")"
-#   unset BACKUP_PASS_PLAINTEXT
-#
-# so the plaintext never reaches rclone's config and no one has to run
-# `rclone obscure` by hand.

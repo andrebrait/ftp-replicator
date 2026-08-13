@@ -10,20 +10,21 @@ is an environment variable, so replicating it is a matter of filling in `.env`.
 
 ```mermaid
 flowchart TD
-    client["Uploading client<br/><small>writes a file, then renames it ~1-2s later</small>"]
-    source["SFTPGo &quot;source&quot;<br/><small>ingest + its own data retention</small>"]
-    daemon["event-daemon.py<br/><small>consolidates events, then calls rclone</small>"]
-    sweep["replicator.sh<br/><small>reconciliation sweep, every SYNC_INTERVAL</small>"]
-    backup["SFTPGo &quot;backup&quot;<br/><small>keeps everything</small>"]
+    client[Uploading client]
+    source[SFTPGo source<br/>ingest plus its own data retention]
+    daemon[event-daemon.py<br/>consolidates events then calls rclone]
+    sweep[replicator.sh<br/>reconciliation sweep every SYNC_INTERVAL]
+    backup[SFTPGo backup<br/>keeps everything]
+    inbox[Your inbox]
 
-    client -->|FTP| source
-    source -->|"HTTP event action, per upload and rename"| daemon
-    source -.->|"read-only mount"| sweep
+    client -->|FTP upload then rename| source
+    source -->|HTTP event action per upload and rename| daemon
+    source -.->|read-only mount| sweep
     daemon -->|rclone| backup
-    sweep -->|"rclone, only what the daemon missed"| backup
-    sweep -.->|"email report"| inbox["your inbox"]
+    sweep -->|rclone for whatever the daemon missed| backup
+    sweep -.->|email only when it finds something| inbox
 
-    subgraph repo ["this repo"]
+    subgraph repo [this repo]
         daemon
         sweep
     end
@@ -95,6 +96,7 @@ All via environment (`.env`, see `.env.example`).
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `RCLONE_CONFIG_BACKUP_*` | — | the rclone remote named `backup:`, defined entirely by env vars |
+| `BACKUP_PASS_PLAINTEXT` | — | alternative to `RCLONE_CONFIG_BACKUP_PASS`: given this, `replicator.sh` obscures it at startup, so no one runs `rclone obscure` by hand |
 | `RCLONE_CONFIG_BACKUP_KNOWN_HOSTS_FILE` | — | known_hosts path; without it rclone does no host-key validation |
 | `SYNC_SRC` | `/data/source` | read-only mount of the source instance's data directory |
 | `SYNC_DEST` | `backup:` | rclone remote |
@@ -139,8 +141,7 @@ Gotchas found the hard way:
 ## Deploying
 
 Any runtime that gives you rclone + python3, a read-only mount of the source data
-directory, and a port SFTPGo can reach. `examples/compose.yaml` is one way, not a
-requirement; `replicator.sh` is the entrypoint and starts the daemon itself (and restarts
+directory, and a port SFTPGo can reach. `compose.yaml` is one way, not a requirement; `replicator.sh` is the entrypoint and starts the daemon itself (and restarts
 it if it dies).
 
 ## Operating it

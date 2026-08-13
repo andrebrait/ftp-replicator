@@ -60,6 +60,18 @@ trap cleanup EXIT INT TERM
 
 now_utc() { date -u +%FT%TZ; }
 
+# rclone will not take a plaintext SFTP password: the value in
+# RCLONE_CONFIG_BACKUP_PASS has to be obscured. Supply either that (already
+# obscured) or BACKUP_PASS_PLAINTEXT, which is obscured here at startup so the
+# plaintext never has to be run through `rclone obscure` by hand. Exported, so
+# the event daemon started below inherits it.
+if [ -z "${RCLONE_CONFIG_BACKUP_PASS:-}" ] && [ -n "${BACKUP_PASS_PLAINTEXT:-}" ]; then
+  RCLONE_CONFIG_BACKUP_PASS="$(rclone obscure "$BACKUP_PASS_PLAINTEXT")"
+  export RCLONE_CONFIG_BACKUP_PASS
+  unset BACKUP_PASS_PLAINTEXT
+  echo "[$(now_utc)] obscured BACKUP_PASS_PLAINTEXT for rclone"
+fi
+
 # send_mail SUBJECT BODY [ATTACHMENT_PATH]
 send_mail() {
   _subj="$1"; _body="$2"; _att="${3:-}"
