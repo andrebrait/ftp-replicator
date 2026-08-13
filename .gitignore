@@ -1,0 +1,5 @@
+# Real configuration and host keys never belong in the repo.
+.env
+backup_known_hosts
+__pycache__/
+*.pyc

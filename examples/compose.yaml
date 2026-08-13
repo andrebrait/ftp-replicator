@@ -1,0 +1,38 @@
+# Example only -- one way to run the replicator, not a requirement. Anything that
+# provides rclone + python3, a read-only mount of the source data directory, and a
+# port the source SFTPGo can reach will do.
+#
+# Add this service alongside your source SFTPGo instance. The rclone remote named
+# "backup" is defined purely by RCLONE_CONFIG_BACKUP_* variables, so there is no
+# rclone config file to manage.
+
+services:
+  footage-sync:
+    image: rclone/rclone:latest
+    restart: unless-stopped
+    user: "0:0"
+    env_file:
+      - .env
+    volumes:
+      # The source instance's data directory, read-only: the replicator only reads.
+      - /srv/footage:/data/source:ro
+      - ./footage-sync.sh:/footage-sync.sh:ro
+      - ./event-daemon.py:/event-daemon.py:ro
+      - ./reap-orphans.py:/reap-orphans.py:ro
+      # Pin the backup's host key; without this rclone does no host-key validation.
+      # Generate with: ssh-keyscan -p <port> <host> > backup_known_hosts
+      - ./backup_known_hosts:/known_hosts:ro
+    # The source SFTPGo posts upload/rename events here. Loopback only.
+    ports:
+      - "127.0.0.1:8787:8787"
+    entrypoint: ["/bin/sh", "/footage-sync.sh"]
+
+# rclone needs the SFTP password OBSCURED, never plaintext. Either put an already
+# obscured value in RCLONE_CONFIG_BACKUP_PASS, or keep the plaintext in
+# BACKUP_PASS_PLAINTEXT and obscure it at startup by prefixing the entrypoint with:
+#
+#   export RCLONE_CONFIG_BACKUP_PASS="$(rclone obscure "$BACKUP_PASS_PLAINTEXT")"
+#   unset BACKUP_PASS_PLAINTEXT
+#
+# so the plaintext never reaches rclone's config and no one has to run
+# `rclone obscure` by hand.
