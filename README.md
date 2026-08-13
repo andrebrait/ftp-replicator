@@ -11,17 +11,17 @@ is an environment variable, so replicating it is a matter of filling in `.env`.
 ```mermaid
 flowchart TD
     client[Uploading client]
-    source[SFTPGo source<br/>ingest plus its own data retention]
-    daemon[event-daemon.py<br/>consolidates events then calls rclone]
-    sweep[replicator.sh<br/>reconciliation sweep every SYNC_INTERVAL]
-    backup[SFTPGo backup<br/>keeps everything]
+    source[SFTPGo source]
+    daemon[event-daemon.py]
+    sweep[replicator.sh sweep]
+    backup[SFTPGo backup]
     inbox[Your inbox]
 
     client -->|FTP upload then rename| source
     source -->|HTTP event action per upload and rename| daemon
     source -.->|read-only mount| sweep
-    daemon -->|rclone| backup
-    sweep -->|rclone for whatever the daemon missed| backup
+    daemon -->|rclone, within seconds| backup
+    sweep -->|rclone, only what the daemon missed| backup
     sweep -.->|email only when it finds something| inbox
 
     subgraph repo [this repo]
