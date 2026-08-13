@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Push DVR clips to the backup as SFTPGo reports them, using rclone.
+"""Push recordings to the backup as SFTPGo reports them, using rclone.
 
 SFTPGo fires an HTTP action per upload and per rename; this daemon turns those
 into rclone calls. It is deliberately disposable: no persistence, no retries, no
 email. Anything it drops (crash, restart, power cut, failed rclone call) is
-picked up by the reconciliation sweep in footage-sync.sh, and that sweep's email
+picked up by the reconciliation sweep in replicator.sh, and that sweep's email
 is the signal that something here missed one -- so every event, decision and
 rclone invocation is logged, greppable by file name.
 

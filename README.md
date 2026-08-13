@@ -18,14 +18,14 @@ is an environment variable, so replicating it is a matter of filling in `.env`.
         |                                                    v
         |                                              SFTPGo  "backup"
         |                                              - SFTP in
-        `--- footage-sync.sh sweep (rclone, every 5 min) ---> (same target)
+        `--- replicator.sh sweep (rclone, every 5 min) ---> (same target)
 ```
 
 Two independent paths write to the backup, and only these two:
 
 * **event-daemon.py** — the normal path. SFTPGo POSTs every upload and rename to it; it
   pushes the clip within seconds.
-* **footage-sync.sh** — the safety net, every `SYNC_INTERVAL`. Copies whatever the daemon
+* **replicator.sh** — the safety net, every `SYNC_INTERVAL`. Copies whatever the daemon
   missed (crash, restart, failed call, backup offline) and emails a report when it finds
   anything. **An email therefore means the event path dropped one** — that is the signal;
   the daemon itself never mails.
@@ -68,7 +68,7 @@ are logged and skipped; only real misses are copied and mailed.
 | File | Role |
 | --- | --- |
 | `event-daemon.py` | HTTP daemon: consolidation buffer + single-consumer rclone queue |
-| `footage-sync.sh` | Reconciliation sweep, mail reporting, supervises the daemon |
+| `replicator.sh` | Reconciliation sweep, mail reporting, supervises the daemon |
 | `reap-orphans.py` | Deletes pre-rename duplicates on the backup (see below) |
 | `test_event_daemon.py` | `python3 test_event_daemon.py` — asserts only, no framework, no network |
 
@@ -126,7 +126,7 @@ Gotchas found the hard way:
 
 Any runtime that gives you rclone + python3, a read-only mount of the source data
 directory, and a port SFTPGo can reach. `examples/compose.yaml` is one way, not a
-requirement; `footage-sync.sh` is the entrypoint and starts the daemon itself (and
+requirement; `replicator.sh` is the entrypoint and starts the daemon itself (and
 restarts it if it dies).
 
 ## Operating it

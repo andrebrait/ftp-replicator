@@ -7,7 +7,7 @@
 # rclone config file to manage.
 
 services:
-  footage-sync:
+  replicator:
     image: rclone/rclone:latest
     restart: unless-stopped
     user: "0:0"
@@ -16,7 +16,7 @@ services:
     volumes:
       # The source instance's data directory, read-only: the replicator only reads.
       - /srv/footage:/data/source:ro
-      - ./footage-sync.sh:/footage-sync.sh:ro
+      - ./replicator.sh:/replicator.sh:ro
       - ./event-daemon.py:/event-daemon.py:ro
       - ./reap-orphans.py:/reap-orphans.py:ro
       # Pin the backup's host key; without this rclone does no host-key validation.
@@ -25,7 +25,7 @@ services:
     # The source SFTPGo posts upload/rename events here. Loopback only.
     ports:
       - "127.0.0.1:8787:8787"
-    entrypoint: ["/bin/sh", "/footage-sync.sh"]
+    entrypoint: ["/bin/sh", "/replicator.sh"]
 
 # rclone needs the SFTP password OBSCURED, never plaintext. Either put an already
 # obscured value in RCLONE_CONFIG_BACKUP_PASS, or keep the plaintext in

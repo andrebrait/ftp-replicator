@@ -1,6 +1,7 @@
 #!/bin/sh
-# footage-sync: periodic rclone reconciliation of DVR footage to the backup SFTP
-# remote, with email notifications sent directly from this container (msmtp).
+# replicator: pushes recordings to the backup as the source instance reports them
+# (event-daemon.py), and reconciles whatever that missed on an interval. Email
+# notifications are sent directly from this container (msmtp).
 #
 #   - After every sweep that copies files: emails a zipped CSV report
 #     (SFTPGo-retention-report style) listing each copied file + size.
@@ -27,6 +28,7 @@ DST="${DST%/}/"
 INTERVAL="${SYNC_INTERVAL:-300}"
 MIN_AGE="${MIN_AGE:-5m}"
 FAIL_THRESHOLD=3
+SUBJECT_PREFIX="${MAIL_SUBJECT_PREFIX:-[replicator]}"
 ALERT_MIN_GAP=3600
 LOCK=/tmp/sweep.lock
 
@@ -100,7 +102,7 @@ ensure_daemon() {
 fail_count=0
 last_alert=0
 daemon_pid=""
-echo "footage-sync starting; interval=${INTERVAL}s min_age=${MIN_AGE} src=${SRC} dst=${DST}"
+echo "replicator starting; interval=${INTERVAL}s min_age=${MIN_AGE} src=${SRC} dst=${DST}"
 ensure_daemon
 
 while true; do
@@ -168,8 +170,8 @@ print(d.get("Size", -1))' 2>/dev/null || echo -1)"
     fail_count=0
     n="$(wc -l < "$list" | tr -d ' ')"
     if [ "${n:-0}" -gt 0 ]; then
-      csv=/tmp/footage-sync-report.csv
-      zipf=/tmp/footage-sync-report.zip
+      csv=/tmp/replication-report.csv
+      zipf=/tmp/replication-report.zip
       total=0
       printf 'path,copied size (bytes),info,error\r\n' > "$csv"
       while IFS= read -r rel; do
@@ -180,7 +182,7 @@ print(d.get("Size", -1))' 2>/dev/null || echo -1)"
       done < "$list"
       printf 'TOTAL (%s files),%s,,\r\n' "$n" "$total" >> "$csv"
       rm -f "$zipf"; ( cd /tmp && zip -q "$(basename "$zipf")" "$(basename "$csv")" )
-      body="Footage replication sweep OK.
+      body="Replication sweep OK.
 Time: ${ts}
 Copied: ${n} file(s), ${total} bytes
 Source: ${SRC}
@@ -192,8 +194,8 @@ the sweep only copies what the daemon left behind, and each copy was confirmed
 missing by a direct stat, not just by a directory listing. To see what the
 daemon did with one of them:
 
-  docker logs footage-sync 2>&1 | grep '<file name>'"
-      send_mail "[DVR] Footage replication: ${n} file(s) copied" "$body" "$zipf"
+  <your log viewer for this container> | grep '<file name>'"
+      send_mail "${SUBJECT_PREFIX} ${n} file(s) copied" "$body" "$zipf"
       echo "[$ts] copied ${n} files (${total} bytes) in ${elapsed}s; report emailed"
     else
       echo "[$ts] sweep ok in ${elapsed}s; nothing new to copy (${false_pos} listing artefact(s))"
@@ -206,7 +208,7 @@ daemon did with one of them:
     printf '%s\n' "$reap_out" | sed "s/^/[$ts] reap: /"
     reaped="$(printf '%s\n' "$reap_out" | grep -c '^orphan ')"
     if [ "${reaped:-0}" -gt 0 ]; then
-      send_mail "[DVR] Backup cleanup: ${reaped} pre-rename duplicate(s) deleted" "Deleted pre-rename duplicates on the backup.
+      send_mail "${SUBJECT_PREFIX} ${reaped} pre-rename duplicate(s) deleted" "Deleted pre-rename duplicates on the backup.
 Time: ${ts}
 Target: ${DST}
 
@@ -220,7 +222,7 @@ the backup; footage the local retention has pruned is never touched."
     echo "[$ts] sweep FAILED rc=${rc} in ${elapsed}s (streak=${fail_count})"
     now="$(date +%s)"
     if [ "$fail_count" -ge "$FAIL_THRESHOLD" ] && [ $(( now - last_alert )) -ge "$ALERT_MIN_GAP" ]; then
-      body="Footage replication FAILED.
+      body="Replication FAILED.
 Time: ${ts}
 rclone exit code: ${rc}
 Consecutive failed sweeps: ${fail_count}
@@ -230,7 +232,7 @@ Sweep interval: ${INTERVAL}s
 
 --- last 30 log lines ---
 $(tail -n 30 "$log")"
-      send_mail "[DVR] Footage replication FAILED (rc=${rc}, ${fail_count} in a row)" "$body" ""
+      send_mail "${SUBJECT_PREFIX} FAILED (rc=${rc}, ${fail_count} in a row)" "$body" ""
       last_alert="$now"
       echo "[$ts] failure alert emailed"
     fi
