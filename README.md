@@ -1,4 +1,4 @@
-# ftp-replicator
+# FTP Replicator
 
 Replicates files from one SFTPGo instance to another, driven by SFTPGo's event actions,
 with rclone doing all of the copying.
