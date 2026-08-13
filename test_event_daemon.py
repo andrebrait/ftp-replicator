@@ -4,6 +4,8 @@
 Run: python3 test_event_daemon.py   (asserts only, no framework, no network)
 """
 import importlib.util
+import json
+import re
 import os
 import sys
 import tempfile
@@ -242,6 +244,52 @@ def test_a_failing_rclone_call_does_not_kill_the_consumer():
     d.handle(ed.Job(FILE, ()))
     d.handle(ed.Job(FILE, ()))
     assert len(d.runner.calls) == 2, d.runner.calls
+
+
+# ---- log output --------------------------------------------------------
+
+def emitted(fn):
+    """Run fn with stdout captured, return the lines it logged."""
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn()
+    return [l for l in buf.getvalue().splitlines() if l.strip()]
+
+
+def test_json_is_the_default_shape_and_carries_fields_not_just_a_sentence():
+    line = emitted(lambda: ed.log("queued", event="release", path=FILE, depth=3))[0]
+    rec = json.loads(line)
+    assert rec["component"] == "daemon", rec
+    assert rec["msg"] == "queued", rec
+    assert rec["event"] == "release", rec
+    assert rec["path"] == FILE, rec
+    assert rec["depth"] == 3, rec
+    assert rec["level"] == "info", rec
+    # ISO-8601 UTC, same instant format the text mode prints
+    assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$", rec["time"]), rec
+
+
+def test_a_file_name_with_quotes_and_backslashes_stays_parseable():
+    nasty = 'Uploads/od"d\\name_20260813122116.mp4'
+    rec = json.loads(emitted(lambda: ed.log("queued", path=nasty))[0])
+    assert rec["path"] == nasty, rec
+
+
+def test_text_mode_prints_the_bracketed_line():
+    ed.LOG_JSON = False
+    try:
+        line = emitted(lambda: ed.log("queued", event="release", path=FILE, depth=3))[0]
+    finally:
+        ed.LOG_JSON = True
+    assert re.match(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] daemon: queued", line), line
+    assert FILE in line, line          # the fields still have to be readable
+    assert "depth=3" in line, line
+
+
+def test_level_is_carried_through():
+    rec = json.loads(emitted(lambda: ed.log("rclone failed", level="error", rc=3))[0])
+    assert rec["level"] == "error" and rec["rc"] == 3, rec
 
 
 def main():

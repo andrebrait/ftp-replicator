@@ -12,22 +12,34 @@ is an environment variable, so replicating it is a matter of filling in `.env`.
 flowchart TD
     client[Uploading client]
     source[SFTPGo source]
+    store[(Source storage)]
     daemon[event-daemon.py]
     sweep[replicator.sh sweep]
     backup[SFTPGo backup]
     inbox[Your inbox]
 
     client -->|FTP upload then rename| source
+    source -->|writes| store
     source -->|HTTP event action per upload and rename| daemon
-    source -.->|read-only mount| sweep
+    store -.->|read-only mount| daemon
+    store -.->|read-only mount| sweep
     daemon -->|rclone, within seconds| backup
     sweep -->|rclone, only what the daemon missed| backup
     sweep -.->|email only when it finds something| inbox
 
-    subgraph repo [this repo]
+    subgraph repo [FTP Replicator]
         daemon
         sweep
     end
+
+    classDef sftpgo fill:#dbeafe,stroke:#1d4ed8,color:#0b1324
+    classDef ours fill:#dcfce7,stroke:#15803d,color:#052e16
+    classDef outside fill:#f1f5f9,stroke:#64748b,color:#0f172a
+    classDef disk fill:#fef3c7,stroke:#b45309,color:#1c1917
+    class source,backup sftpgo
+    class daemon,sweep ours
+    class client,inbox outside
+    class store disk
 ```
 
 Two paths write to the backup, and only these two:

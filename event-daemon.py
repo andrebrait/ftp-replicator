@@ -48,12 +48,26 @@ TIMEOUT = int(os.environ.get("SYNC_RCLONE_TIMEOUT", "900"))
 QUIET = float(os.environ.get("SYNC_QUIET_PERIOD", "2"))
 FLUSH_INTERVAL = float(os.environ.get("SYNC_FLUSH_INTERVAL", "1"))
 MAX_AGE = float(os.environ.get("SYNC_MAX_ENTRY_AGE", "290"))
+COMPONENT = "daemon"
+LOG_JSON = os.environ.get("LOG_FORMAT", "json").lower() != "text"
 
 Job = collections.namedtuple("Job", "final olds")
 
 
-def log(msg):
-    print("[%s] daemon: %s" % (time.strftime("%FT%TZ", time.gmtime()), msg), flush=True)
+def log(msg, level="info", **fields):
+    """One line per event. JSON by default so it can be filtered alongside
+    SFTPGo's own output; LOG_FORMAT=text gives the bracketed human form.
+
+    The fields are the point: `event`, `path`, `target`, `rc`, `elapsed_ms` and
+    friends are what you filter on. `msg` is only there to be read."""
+    ts = time.strftime("%FT%TZ", time.gmtime())
+    if LOG_JSON:
+        record = {"time": ts, "level": level, "component": COMPONENT, "msg": msg}
+        record.update(fields)
+        print(json.dumps(record, sort_keys=False), flush=True)
+        return
+    extra = " ".join("%s=%s" % (k, v) for k, v in fields.items())
+    print("[%s] %s: %s%s" % (ts, COMPONENT, msg, " " + extra if extra else ""), flush=True)
 
 
 class RcloneRunner:
