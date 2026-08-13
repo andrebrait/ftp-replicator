@@ -70,8 +70,8 @@ def siblings(name):
             yield "%s_%s%s" % (prefix, (stamp + timedelta(seconds=delta)).strftime("%Y%m%d%H%M%S"), ext)
 
 
-def main():
-    dry = "--dry-run" in sys.argv
+def reap(dry=False):
+    """Returns (deleted, kept). replicator.py replaces `log` with its own."""
     deleted = kept = 0
     days = sorted(os.listdir(SRC))
     for day in days[-DAYS:] if DAYS else days:
@@ -99,7 +99,8 @@ def main():
                                capture_output=True, text=True)
             deleted += 1
     log("reap finished", event="summary", deleted=deleted, kept=kept)
+    return deleted, kept
 
 
 if __name__ == "__main__":
-    main()
+    reap(dry="--dry-run" in sys.argv)

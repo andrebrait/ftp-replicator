@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Checks for event-daemon.py: consolidation window, and the rclone commands built.
+"""Checks for replicator.py: consolidation window, sweep decisions, reporting.
 
-Run: python3 test_event_daemon.py   (asserts only, no framework, no network)
+Run: python3 test_replicator.py   (asserts only, no framework, no network)
 """
 import importlib.util
 import json
@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-spec = importlib.util.spec_from_file_location("event_daemon", os.path.join(HERE, "event-daemon.py"))
+spec = importlib.util.spec_from_file_location("replicator", os.path.join(HERE, "replicator.py"))
 ed = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ed)
 
@@ -260,7 +260,7 @@ def emitted(fn):
 def test_json_is_the_default_shape_and_carries_fields_not_just_a_sentence():
     line = emitted(lambda: ed.log("queued", event="release", path=FILE, depth=3))[0]
     rec = json.loads(line)
-    assert rec["component"] == "daemon", rec
+    assert rec["component"] == "replicator", rec
     assert rec["msg"] == "queued", rec
     assert rec["event"] == "release", rec
     assert rec["path"] == FILE, rec
@@ -282,7 +282,7 @@ def test_text_mode_prints_the_bracketed_line():
         line = emitted(lambda: ed.log("queued", event="release", path=FILE, depth=3))[0]
     finally:
         ed.LOG_JSON = True
-    assert re.match(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] daemon: queued", line), line
+    assert re.match(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\] replicator: queued", line), line
     assert FILE in line, line          # the fields still have to be readable
     assert "depth=3" in line, line
 
@@ -290,6 +290,148 @@ def test_text_mode_prints_the_bracketed_line():
 def test_level_is_carried_through():
     rec = json.loads(emitted(lambda: ed.log("rclone failed", level="error", rc=3))[0])
     assert rec["level"] == "error" and rec["rc"] == 3, rec
+
+
+# ---- the sweep -----------------------------------------------------------
+
+class FakeSweepRunner:
+    """rclone stand-in for the sweep: scripted check output and stat answers."""
+
+    def __init__(self, missing=(), differ=(), remote=None, fail=()):
+        self.missing, self.differ = list(missing), list(differ)
+        self.remote = dict(remote or {})
+        self.fail = set(fail)
+        self.calls = []
+        self.check_rc = 0
+
+    def check(self, src, dest, min_age):
+        return self.check_rc, list(self.missing), list(self.differ)
+
+    def stat(self, rel):
+        return self.remote.get(rel)
+
+    def run(self, argv):
+        self.calls.append(argv)
+        return argv[-1] not in self.fail
+
+
+def sweep_for(files, runner):
+    d = ed.Daemon(local_tree(files), "backup:", runner, clock=FakeClock())
+    return ed.Sweep(d, runner, mailer=FakeMailer(), reaper=lambda: (0, 0))
+
+
+class FakeMailer:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, subject, body, attachment=None, filename=None):
+        self.sent.append({"subject": subject, "body": body,
+                          "attachment": attachment, "filename": filename})
+        return True
+
+
+def test_a_candidate_the_stat_finds_is_an_artefact_not_a_copy():
+    """The listing lies sometimes; the stat is what decides."""
+    r = FakeSweepRunner(missing=[FILE], remote={FILE: 100})
+    s = sweep_for({FILE: 100}, r)
+    report = s.run_once()
+    assert r.calls == [], r.calls
+    assert report.copied == [] and report.artefacts == 1, report
+
+
+def test_a_candidate_the_stat_cannot_find_is_copied():
+    r = FakeSweepRunner(missing=[FILE])
+    s = sweep_for({FILE: 100}, r)
+    report = s.run_once()
+    assert [c[0] for c in r.calls] == ["copyto"], r.calls
+    assert report.copied == [FILE] and report.artefacts == 0, report
+
+
+def test_a_candidate_with_the_wrong_size_on_the_backup_is_copied():
+    r = FakeSweepRunner(differ=[FILE], remote={FILE: 63})
+    s = sweep_for({FILE: 100}, r)
+    assert s.run_once().copied == [FILE]
+
+
+def test_a_candidate_that_vanished_locally_is_left_alone():
+    r = FakeSweepRunner(missing=[FILE])
+    s = sweep_for({}, r)
+    report = s.run_once()
+    assert r.calls == [] and report.copied == [], report
+
+
+def test_a_failed_copy_is_not_reported_as_copied():
+    r = FakeSweepRunner(missing=[FILE], fail={"backup:/" + FILE})
+    s = sweep_for({FILE: 100}, r)
+    report = s.run_once()
+    assert report.copied == [] and report.failed == [FILE], report
+
+
+def test_a_quiet_sweep_sends_no_mail():
+    r = FakeSweepRunner()
+    s = sweep_for({FILE: 100}, r)
+    s.run_once()
+    assert s.mailer.sent == [], s.mailer.sent
+
+
+def test_a_sweep_that_copied_something_mails_one_report_with_the_zip():
+    r = FakeSweepRunner(missing=[FILE])
+    s = sweep_for({FILE: 100}, r)
+    s.run_once()
+    assert len(s.mailer.sent) == 1, s.mailer.sent
+    mail = s.mailer.sent[0]
+    assert "1 file" in mail["subject"], mail["subject"]
+    assert mail["filename"].endswith(".zip"), mail
+    names, body = zip_contents(mail["attachment"])
+    assert names == ["replication-report.csv"], names
+    assert FILE in body and "TOTAL (1 files),100" in body, body
+
+
+def zip_contents(blob):
+    import io, zipfile
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        name = z.namelist()[0]
+        return z.namelist(), z.read(name).decode()
+
+
+# ---- failure alerting ----------------------------------------------------
+
+def failing_sweep():
+    r = FakeSweepRunner()
+    r.check_rc = 7
+    s = sweep_for({}, r)
+    return s
+
+
+def test_one_failed_sweep_does_not_alert():
+    s = failing_sweep()
+    s.run_once()
+    assert s.mailer.sent == [], "alerted on a single failure"
+
+
+def test_alert_fires_only_after_the_threshold_and_then_is_throttled():
+    s = failing_sweep()
+    for _ in range(ed.FAIL_THRESHOLD):
+        s.run_once()
+    assert len(s.mailer.sent) == 1, s.mailer.sent
+    assert "FAILED" in s.mailer.sent[0]["subject"], s.mailer.sent[0]
+    s.run_once()
+    assert len(s.mailer.sent) == 1, "alerted again inside the quiet gap"
+    s.last_alert -= ed.ALERT_MIN_GAP + 1
+    s.run_once()
+    assert len(s.mailer.sent) == 2, "never alerted again after the gap"
+
+
+def test_a_good_sweep_clears_the_failure_streak():
+    s = failing_sweep()
+    s.run_once()
+    s.run_once()
+    s.runner.check_rc = 0
+    s.run_once()
+    assert s.fail_count == 0, s.fail_count
+    s.runner.check_rc = 7
+    s.run_once()
+    assert s.mailer.sent == [], "streak was not reset by the good sweep"
 
 
 def main():

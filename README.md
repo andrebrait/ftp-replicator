@@ -13,8 +13,8 @@ flowchart TD
     client[Uploading client]
     source[SFTPGo source]
     store[(Source storage)]
-    daemon[event-daemon.py]
-    sweep[replicator.sh sweep]
+    daemon[event path]
+    sweep[sweep thread]
     backup[SFTPGo backup]
     inbox[Your inbox]
 
@@ -44,16 +44,16 @@ flowchart TD
 
 Two paths write to the backup, and only these two:
 
-* **event-daemon.py** — the normal path. SFTPGo POSTs every upload and rename to it; it
+* **the event path** — the normal one. SFTPGo POSTs every upload and rename to it; it
   pushes the file within seconds.
-* **replicator.sh** — the safety net, every `SYNC_INTERVAL`. Copies whatever the daemon
+* **the sweep** — the safety net, every `SYNC_INTERVAL`. Copies whatever the daemon
   missed (crash, restart, failed call, backup offline) and emails a report when it finds
   anything. **An email therefore means the event path dropped one** — that is the signal;
   the daemon itself never mails.
 
 The source instance keeps a short retention (SFTPGo's own data-retention rule); the backup
 keeps everything. So the backup is deliberately **not** a mirror, and nothing here ever
-deletes on the backup except `reap-orphans.py` (below) and the scoped `sync` that clears a
+deletes on the backup except `reap_orphans.py` (below) and the scoped `sync` that clears a
 renamed file's old names.
 
 ## Why it is built this way
@@ -89,12 +89,19 @@ are logged and skipped; only real misses are copied and mailed.
 
 | File | Role |
 | --- | --- |
-| `event-daemon.py` | HTTP daemon: consolidation buffer + single-consumer rclone queue |
-| `replicator.sh` | Reconciliation sweep, mail reporting, supervises the daemon |
-| `reap-orphans.py` | Deletes pre-rename duplicates on the backup (see below) |
-| `test_event_daemon.py` | `python3 test_event_daemon.py` — asserts only, no framework, no network |
+| `replicator.py` | The whole thing in one process: HTTP endpoints, consolidation buffer, rclone queue, sweep thread, SMTP reports |
+| `reap_orphans.py` | Deletes pre-rename duplicates on the backup (see below); importable, also runnable alone |
+| `replicator.sh` | Launcher: installs python3 if the image lacks it, obscures the password, `exec`s the Python |
+| `test_replicator.py` | `python3 test_replicator.py` — asserts only, no framework, no network |
 
-`reap-orphans.py` is for files the event path did not settle. It assumes names of the form
+It is one process on purpose. The sweep used to be a shell script: assembling JSON log
+lines in `sh` means hand-escaping file names that contain spaces and quotes, and mailing a
+report meant `msmtp` and `zip` installed at container start. In Python the logger, the
+report and the mail are all first-class, and there is a single place to configure. The
+launcher does no supervision — if the process dies the container dies with it, so your
+runtime restarts it and the failure stays visible.
+
+`reap_orphans.py` is for files the event path did not settle. It assumes names of the form
 `<prefix>_<YYYYmmddHHMMSS>.<ext>` in per-date directories, and a client that renames by
 shifting that timestamp a second or two. It removes a file from the backup only when it
 has no counterpart on the source, a sibling within ±2 s exists on **both** sides, and that
@@ -154,8 +161,7 @@ Gotchas found the hard way:
 ## Deploying
 
 Any runtime that gives you rclone + python3, a read-only mount of the source data
-directory, and a port SFTPGo can reach. `compose.yaml` is one way, not a requirement; `replicator.sh` is the entrypoint and starts the daemon itself (and restarts
-it if it dies).
+directory, and a port SFTPGo can reach. `compose.yaml` is one way, not a requirement; `replicator.sh` is the entrypoint.
 
 ## Operating it
 
