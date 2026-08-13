@@ -13,8 +13,8 @@ flowchart TD
     client[Uploading client]
     source[SFTPGo source]
     store[(Source storage)]
-    daemon[event path]
-    sweep[sweep thread]
+    daemon[Event path thread<br>HTTP endpoints, buffer, rclone queue]
+    sweep[Sweep thread<br>every SYNC_INTERVAL]
     backup[SFTPGo backup]
     inbox[Your inbox]
 
@@ -24,10 +24,10 @@ flowchart TD
     store -.->|read-only mount| daemon
     store -.->|read-only mount| sweep
     daemon -->|rclone, within seconds| backup
-    sweep -->|rclone, only what the daemon missed| backup
+    sweep -->|rclone, only what the event path missed| backup
     sweep -.->|email only when it finds something| inbox
 
-    subgraph repo [FTP Replicator]
+    subgraph proc [replicator.py - one process]
         daemon
         sweep
     end
