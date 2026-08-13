@@ -24,6 +24,10 @@ FILE_RENAMED2 = DAY + "/Source A_01_Node_20260813122114.mp4"
 class FakeRunner:
     def __init__(self):
         self.calls = []
+        self.remote = {}
+
+    def stat(self, rel):
+        return self.remote.get(rel)
 
     def run(self, argv):
         self.calls.append(argv)
@@ -292,6 +296,59 @@ def test_level_is_carried_through():
     assert rec["level"] == "error" and rec["rc"] == 3, rec
 
 
+# ---- a rename that arrives after its entry was already released ----------
+
+class StatRunner(FakeRunner):
+    """Knows what is on the backup, so the late-rename path can consult it."""
+
+    def __init__(self, remote=None):
+        FakeRunner.__init__(self)
+        self.remote = dict(remote or {})
+
+    def stat(self, rel):
+        return self.remote.get(rel)
+
+
+def test_a_late_rename_moves_the_bytes_already_on_the_backup():
+    """Upload released, copied under the old name, and only then the rename
+    lands. The bytes are already there, so rename them in place."""
+    r = StatRunner(remote={FILE: 100})
+    d = ed.Daemon(local_tree({FILE_RENAMED: 100}), "backup:", r, clock=FakeClock())
+    clock = d.clock
+    d.on_rename("/" + FILE, "/" + FILE_RENAMED)      # no upload event: it went earlier
+    clock.tick(ed.MAX_AGE + 1)
+    jobs = d.ready_jobs()
+    assert jobs == [ed.Job(FILE_RENAMED, (FILE,), "move")], jobs
+    d.handle(jobs[0])
+    assert r.calls == [["moveto", "backup:/" + FILE, "backup:/" + FILE_RENAMED]], r.calls
+
+
+def test_a_late_rename_with_nothing_on_the_backup_is_left_to_the_sweep():
+    r = StatRunner()
+    d = ed.Daemon(local_tree({FILE_RENAMED: 100}), "backup:", r, clock=FakeClock())
+    d.on_rename("/" + FILE, "/" + FILE_RENAMED)
+    d.clock.tick(ed.MAX_AGE + 1)
+    assert d.ready_jobs() == [], "pushed a job with no proof the bytes are there"
+    assert d.pending_files() == [], "kept the entry forever"
+
+
+def test_a_late_rename_whose_backup_copy_is_the_wrong_size_is_left_to_the_sweep():
+    """A short copy on the backup must not be renamed into place as if good."""
+    r = StatRunner(remote={FILE: 63})
+    d = ed.Daemon(local_tree({FILE_RENAMED: 100}), "backup:", r, clock=FakeClock())
+    d.on_rename("/" + FILE, "/" + FILE_RENAMED)
+    d.clock.tick(ed.MAX_AGE + 1)
+    assert d.ready_jobs() == [], "renamed a short file into place"
+
+
+def test_a_late_rename_whose_file_is_gone_locally_is_left_to_the_sweep():
+    r = StatRunner(remote={FILE: 100})
+    d = ed.Daemon(local_tree({}), "backup:", r, clock=FakeClock())
+    d.on_rename("/" + FILE, "/" + FILE_RENAMED)
+    d.clock.tick(ed.MAX_AGE + 1)
+    assert d.ready_jobs() == [], d.ready_jobs()
+
+
 # ---- the sweep -----------------------------------------------------------
 
 class FakeSweepRunner:
@@ -317,7 +374,7 @@ class FakeSweepRunner:
 
 def sweep_for(files, runner):
     d = ed.Daemon(local_tree(files), "backup:", runner, clock=FakeClock())
-    return ed.Sweep(d, runner, mailer=FakeMailer(), reaper=lambda: (0, 0))
+    return ed.Sweep(d, runner, mailer=FakeMailer())
 
 
 class FakeMailer:

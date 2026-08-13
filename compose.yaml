@@ -18,7 +18,6 @@ services:
       - /srv/uploads:/data/source:ro
       - ./replicator.sh:/replicator.sh:ro
       - ./replicator.py:/replicator.py:ro
-      - ./reap_orphans.py:/reap_orphans.py:ro
       # Pin the backup's host key; without this rclone does no host-key validation.
       # Generate with: ssh-keyscan -p <port> <host> > backup_known_hosts
       - ./backup_known_hosts:/known_hosts:ro

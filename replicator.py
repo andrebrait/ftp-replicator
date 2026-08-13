@@ -46,7 +46,8 @@ MAX_AGE = float(os.environ.get("SYNC_MAX_ENTRY_AGE", "290"))
 COMPONENT = os.environ.get("LOG_COMPONENT", "replicator")
 LOG_JSON = os.environ.get("LOG_FORMAT", "json").lower() != "text"
 
-Job = collections.namedtuple("Job", "final olds")
+Job = collections.namedtuple("Job", "final olds mode")
+Job.__new__.__defaults__ = ("sync",)   # "sync" copies; "move" renames on the backup
 
 
 def log(msg, level="info", **fields):
@@ -217,12 +218,36 @@ class Daemon:
                     continue
                 jobs.append(Job(entry.final, tuple(entry.olds)))
                 self._forget(key, entry)
+        # Stale means no upload event ever arrived. Usually that is a rename
+        # whose upload was released before it landed: the bytes are already on
+        # the backup under the old name, and all that is missing is the rename.
+        # Confirm that by size and it is a server-side move, no transfer. The
+        # stats go outside the lock; they are network calls.
         for key, entry in stale:
+            jobs.extend(self._salvage(key, entry))
+        return jobs
+
+    def _salvage(self, key, entry):
+        local = os.path.join(self.src, entry.final)
+        try:
+            size = os.path.getsize(local)
+        except OSError:
+            size = None
+        source = None
+        if size is not None:
+            for old in entry.olds:
+                if self.runner.stat(old) == size:
+                    source = old
+                    break
+        with self._lock:
+            self._forget(key, entry)
+        if source is None:
             log("discarded with no upload event, the sweep takes it from here",
                 level="warn", event="discard", path=key, age_s=round(self.max_age))
-            with self._lock:
-                self._forget(key, entry)
-        return jobs
+            return []
+        log("late rename, the bytes are already on the backup under the old name",
+            event="late_rename", path=source, target=entry.final, size=size)
+        return [Job(entry.final, (source,), "move")]
 
     def _forget(self, key, entry):
         self._entries.pop(key, None)
@@ -263,6 +288,9 @@ class Daemon:
 
     def _run(self, job):
         local = os.path.join(self.src, job.final)
+        if job.mode == "move":
+            self.runner.run(["moveto", self.remote(job.olds[0]), self.remote(job.final)])
+            return
         if not os.path.exists(local):
             log("gone locally before we pushed it, leaving it to the sweep",
                 level="warn", event="skip_missing", path=job.final)
@@ -352,11 +380,10 @@ class Report:
 class Sweep:
     """Reconciliation. Owns the failure streak and the alert throttle."""
 
-    def __init__(self, daemon, runner, mailer, reaper, interval=INTERVAL, min_age=MIN_AGE):
+    def __init__(self, daemon, runner, mailer, interval=INTERVAL, min_age=MIN_AGE):
         self.daemon = daemon
         self.runner = runner
         self.mailer = mailer
-        self.reaper = reaper
         self.interval = interval
         self.min_age = min_age
         self.fail_count = 0
@@ -402,7 +429,6 @@ class Sweep:
         report.elapsed = time.time() - started
         self.last_report = report
         self._report(report)
-        self._reap()
         return report
 
     def _report(self, report):
@@ -425,19 +451,6 @@ class Sweep:
         log("copied files the event path missed, report emailed", event="sweep_done",
             files=len(report.copied), bytes=total, elapsed_s=round(report.elapsed, 1),
             listing_artefacts=report.artefacts, failed=len(report.failed))
-
-    def _reap(self):
-        try:
-            deleted, kept = self.reaper()
-        except Exception as exc:                      # noqa: BLE001 - never kill the loop
-            log("reap failed", level="error", event="reap_error",
-                error="%s: %s" % (type(exc).__name__, exc))
-            return
-        if deleted:
-            self.mailer.send("%s %d pre-rename duplicate(s) deleted" % (SUBJECT_PREFIX, deleted),
-                             "Deleted %d pre-rename duplicate(s) on the backup.\n\n"
-                             "Each had a byte-identical twin present on both sides; files the\n"
-                             "source's retention has pruned are never touched.\n" % deleted)
 
     def _on_failure(self, rc, report):
         self.fail_count += 1
@@ -555,21 +568,9 @@ def make_handler(daemon, sweep=None):
 
 
 
-def build_reaper():
-    """reap_orphans as a callable, sharing this process's logger."""
-    try:
-        import reap_orphans
-    except ImportError:
-        log("reap_orphans not importable, skipping duplicate cleanup",
-            level="warn", event="reap_missing")
-        return lambda: (0, 0)
-    reap_orphans.log = log
-    return reap_orphans.reap
-
-
 def main():
     daemon = Daemon()
-    sweep = Sweep(daemon, daemon.runner, Mailer(), build_reaper())
+    sweep = Sweep(daemon, daemon.runner, Mailer())
     threading.Thread(target=daemon.flush_loop, daemon=True).start()
     threading.Thread(target=daemon.consume, daemon=True).start()
     threading.Thread(target=sweep.loop, daemon=True).start()

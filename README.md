@@ -21,8 +21,8 @@ flowchart TD
     client -->|FTP upload then rename| source
     source -->|writes| store
     source -->|HTTP event action per upload and rename| daemon
-    store -.->|read-only mount| daemon
-    store -.->|read-only mount| sweep
+    store -.->|reads| daemon
+    store -.->|reads| sweep
     daemon -->|rclone, within seconds| backup
     sweep -->|rclone, only what the event path missed| backup
     sweep -.->|email only when it finds something| inbox
@@ -52,9 +52,8 @@ Two paths write to the backup, and only these two:
   the daemon itself never mails.
 
 The source instance keeps a short retention (SFTPGo's own data-retention rule); the backup
-keeps everything. So the backup is deliberately **not** a mirror, and nothing here ever
-deletes on the backup except `reap_orphans.py` (below) and the scoped `sync` that clears a
-renamed file's old names.
+keeps everything. So the backup is deliberately **not** a mirror: the only thing here that
+ever deletes on the backup is the scoped `sync` clearing a renamed file's old names.
 
 ## Why it is built this way
 
@@ -90,7 +89,6 @@ are logged and skipped; only real misses are copied and mailed.
 | File | Role |
 | --- | --- |
 | `replicator.py` | The whole thing in one process: HTTP endpoints, consolidation buffer, rclone queue, sweep thread, SMTP reports |
-| `reap_orphans.py` | Deletes pre-rename duplicates on the backup (see below); importable, also runnable alone |
 | `replicator.sh` | Launcher: installs python3 if the image lacks it, obscures the password, `exec`s the Python |
 | `test_replicator.py` | `python3 test_replicator.py` — asserts only, no framework, no network |
 
@@ -100,13 +98,6 @@ report meant `msmtp` and `zip` installed at container start. In Python the logge
 report and the mail are all first-class, and there is a single place to configure. The
 launcher does no supervision — if the process dies the container dies with it, so your
 runtime restarts it and the failure stays visible.
-
-`reap_orphans.py` is for files the event path did not settle. It assumes names of the form
-`<prefix>_<YYYYmmddHHMMSS>.<ext>` in per-date directories, and a client that renames by
-shifting that timestamp a second or two. It removes a file from the backup only when it
-has no counterpart on the source, a sibling within ±2 s exists on **both** sides, and that
-sibling has the same size on both — so files the source's retention merely aged out are
-never touched.
 
 ## Configuration
 
@@ -126,8 +117,6 @@ All via environment (`.env`, see `.env.example`).
 | `SYNC_RCLONE_TIMEOUT` | `900` | per-invocation timeout |
 | `SYNC_INTERVAL` | `300` | seconds between sweeps |
 | `MIN_AGE` | `5m` | sweep ignores files younger than this |
-| `REAP_SRC` / `REAP_REMOTE` | `/data/source`, `backup:/` | must point at the directory that *directly* contains the date directories |
-| `REAP_DAYS` | `2` | how many recent date directories to scan; `0` scans all |
 | `SMTP_*`, `MAIL_FROM`, `MAIL_TO` | — | msmtp settings for the sweep's reports |
 | `MAIL_SUBJECT_PREFIX` | `[replicator]` | subject prefix for those reports |
 | `LOG_FORMAT` | `json` | `json` for one object per line, `text` for `[<ISO-8601 UTC>] <component>: <message>` |
