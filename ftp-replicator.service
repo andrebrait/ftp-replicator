@@ -1,0 +1,28 @@
+# Native alternative to compose.yaml: SFTPGo and the replicator on one host.
+# Install replicator.sh, replicator.py and known_hosts under /opt/ftp-replicator,
+# and the .env as /etc/ftp-replicator/env with SYNC_DAEMON_ADDR=127.0.0.1,
+# SYNC_SRC pointing at SFTPGo's data directory and
+# RCLONE_CONFIG_BACKUP_KNOWN_HOSTS_FILE=/opt/ftp-replicator/known_hosts.
+[Unit]
+Description=FTP Replicator (SFTPGo event-driven backup)
+Wants=network-online.target
+After=network-online.target tailscaled.service
+
+[Service]
+EnvironmentFile=/etc/ftp-replicator/env
+Environment=HOME=/var/lib/ftp-replicator
+ExecStart=/bin/sh /opt/ftp-replicator/replicator.sh
+DynamicUser=yes
+# Read access to SFTPGo's data directory (mode 750 sftpgo:sftpgo); never write it.
+SupplementaryGroups=sftpgo
+ReadOnlyPaths=/srv/sftpgo
+StateDirectory=ftp-replicator
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

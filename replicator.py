@@ -37,6 +37,7 @@ from email.message import EmailMessage
 
 SRC = os.environ.get("SYNC_SRC", "/data/source")
 DEST = os.environ.get("SYNC_DEST", "backup:")
+ADDR = os.environ.get("SYNC_DAEMON_ADDR", "0.0.0.0")
 PORT = int(os.environ.get("SYNC_DAEMON_PORT", "8787"))
 RCLONE = os.environ.get("SYNC_RCLONE", "rclone")
 TIMEOUT = int(os.environ.get("SYNC_RCLONE_TIMEOUT", "900"))
@@ -574,8 +575,8 @@ def main():
     threading.Thread(target=daemon.flush_loop, daemon=True).start()
     threading.Thread(target=daemon.consume, daemon=True).start()
     threading.Thread(target=sweep.loop, daemon=True).start()
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), make_handler(daemon, sweep))
-    log("replicator starting", event="start", port=PORT, src=daemon.src, dest=daemon.dest,
+    server = http.server.ThreadingHTTPServer((ADDR, PORT), make_handler(daemon, sweep))
+    log("replicator starting", event="start", addr=ADDR, port=PORT, src=daemon.src, dest=daemon.dest,
         quiet_s=daemon.quiet, max_entry_age_s=round(daemon.max_age),
         interval_s=round(sweep.interval), min_age=sweep.min_age)
     try:

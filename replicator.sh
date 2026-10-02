@@ -27,4 +27,4 @@ if [ -z "${RCLONE_CONFIG_BACKUP_PASS:-}" ] && [ -n "${BACKUP_PASS_PLAINTEXT:-}" 
   unset BACKUP_PASS_PLAINTEXT
 fi
 
-exec python3 /replicator.py
+exec python3 "$(dirname "$0")/replicator.py"

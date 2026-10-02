@@ -110,6 +110,7 @@ All via environment (`.env`, see `.env.example`).
 | `RCLONE_CONFIG_BACKUP_KNOWN_HOSTS_FILE` | — | known_hosts path; without it rclone does no host-key validation |
 | `SYNC_SRC` | `/data/source` | read-only mount of the source instance's data directory |
 | `SYNC_DEST` | `backup:` | rclone remote |
+| `SYNC_DAEMON_ADDR` | `0.0.0.0` | daemon listen address; `127.0.0.1` when SFTPGo runs on the same host outside a container |
 | `SYNC_DAEMON_PORT` | `8787` | daemon listen port; publish it on loopback only |
 | `SYNC_QUIET_PERIOD` | `2` | seconds of silence before an entry is released |
 | `SYNC_FLUSH_INTERVAL` | `1` | how often the buffer is checked |
@@ -150,7 +151,15 @@ Gotchas found the hard way:
 ## Deploying
 
 Any runtime that gives you rclone + python3, a read-only mount of the source data
-directory, and a port SFTPGo can reach. `compose.yaml` is one way, not a requirement; `replicator.sh` is the entrypoint.
+directory, and a port SFTPGo can reach. `replicator.sh` is the entrypoint; it finds
+`replicator.py` next to itself.
+
+* **Containers:** `compose.yaml`. The daemon binds `0.0.0.0` inside the container; publish
+  the port on loopback only.
+* **Native (VM or LXC, alongside SFTPGo's `.deb`):** `ftp-replicator.service`. Set
+  `SYNC_DAEMON_ADDR=127.0.0.1` so the unauthenticated endpoints never reach the network.
+  The unit runs as a dynamic user with the `sftpgo` group, which gives it read-only access to
+  SFTPGo's `750` data directory. The unit file header lists the install paths.
 
 ## Operating it
 
