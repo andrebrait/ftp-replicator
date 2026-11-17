@@ -430,13 +430,110 @@ def test_a_quiet_sweep_sends_no_mail():
     s.run_once()
     assert s.mailer.sent == [], s.mailer.sent
 
+def test_a_sweep_that_will_copy_notifies_before_the_copies_and_after():
+    r = FakeSweepRunner(missing=[FILE])
+    s = sweep_for({FILE: 100}, r)
+    order = []
+    real_send = s.mailer.send
+
+    def send(*args, **kwargs):
+        order.append(("notify", len(r.calls)))
+        return real_send(*args, **kwargs)
+
+    s.mailer.send = send
+    real_run = r.run
+
+    def run(argv):
+        order.append(("copy", argv[0]))
+        return real_run(argv)
+
+    r.run = run
+    s.run_once()
+    assert order[0] == ("notify", 0), order
+    assert order[1] == ("copy", "copyto"), order
+    assert len(s.mailer.sent) == 2, s.mailer.sent
+    assert "starting" in s.mailer.sent[0]["subject"], s.mailer.sent[0]
+    assert "1 file" in s.mailer.sent[1]["subject"], s.mailer.sent[1]
+    assert s.mailer.sent[1]["filename"].endswith(".zip")
+
+
+def test_a_failed_copy_still_notifies_start_and_finish():
+    r = FakeSweepRunner(missing=[FILE], fail={"backup:/" + FILE})
+    s = sweep_for({FILE: 100}, r)
+    s.run_once()
+    assert len(s.mailer.sent) == 2, s.mailer.sent
+    assert "starting" in s.mailer.sent[0]["subject"], s.mailer.sent[0]
+    assert "failed" in s.mailer.sent[1]["subject"].lower(), s.mailer.sent[1]
+
+
+def test_telegram_post_uses_the_chat_and_omits_the_token_from_errors():
+    captured = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    def opener(req, timeout=30):
+        captured.append(req)
+        raise OSError("https://api.telegram.org/botsecret-token/sendMessage failed")
+
+    try:
+        ed.post_telegram("secret-token", "4242", "hello", opener=opener)
+    except OSError as exc:
+        assert "secret-token" not in str(exc), exc
+    else:
+        raise AssertionError("expected a token-stripped error")
+    req = captured[0]
+    assert req.full_url.endswith("/botsecret-token/sendMessage"), req.full_url
+    assert b'"chat_id": "4242"' in req.data or b'"chat_id":"4242"' in req.data, req.data
+    assert b"hello" in req.data
+
+
+def test_mailer_still_sends_telegram_when_smtp_is_unset():
+    captured = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"ok":true}'
+
+    def opener(req, timeout=30):
+        captured.append(req)
+        return Resp()
+
+    os.environ["TELEGRAM_BOT_TOKEN"] = "tok"
+    os.environ["TELEGRAM_CHAT_ID"] = "99"
+    try:
+        mailer = ed.Mailer()
+        mailer.host = None
+        mailer._opener = opener
+        assert mailer.send("subj", "body") is True
+    finally:
+        os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        os.environ.pop("TELEGRAM_CHAT_ID", None)
+    assert captured, "telegram was not called"
+    assert b"subj" in captured[0].data and b"body" in captured[0].data
+
+
 
 def test_a_sweep_that_copied_something_mails_one_report_with_the_zip():
     r = FakeSweepRunner(missing=[FILE])
     s = sweep_for({FILE: 100}, r)
     s.run_once()
-    assert len(s.mailer.sent) == 1, s.mailer.sent
-    mail = s.mailer.sent[0]
+    reports = [m for m in s.mailer.sent if m.get("filename")]
+    assert len(reports) == 1, s.mailer.sent
+    mail = reports[0]
     assert "1 file" in mail["subject"], mail["subject"]
     assert mail["filename"].endswith(".zip"), mail
     names, body = zip_contents(mail["attachment"])

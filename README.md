@@ -25,7 +25,7 @@ flowchart TD
     store -.->|reads| sweep
     daemon -->|rclone, within seconds| backup
     sweep -->|rclone, only what the event path missed| backup
-    sweep -.->|email only when it finds something| inbox
+    sweep -.->|email and telegram when it finds something| inbox
 
     subgraph proc [replicator.py]
         daemon
@@ -47,9 +47,10 @@ Two paths write to the backup, and only these two:
 * **the event path** — the normal one. SFTPGo POSTs every upload and rename to it; it
   pushes the file within seconds.
 * **the sweep** — the safety net, every `SYNC_INTERVAL`. Copies whatever the daemon
-  missed (crash, restart, failed call, backup offline) and emails a report when it finds
-  anything. **An email therefore means the event path dropped one** — that is the signal;
-  the daemon itself never mails.
+  missed (crash, restart, failed call, backup offline). When it has files to copy it
+  sends email and Telegram before the copies, and again afterwards. A quiet sweep
+  stays silent. **A notice therefore means the event path dropped one** — that is the
+  signal; the daemon itself never notifies.
 
 The source instance keeps a short retention (SFTPGo's own data-retention rule); the backup
 keeps everything. So the backup is deliberately **not** a mirror: the only thing here that
@@ -118,7 +119,8 @@ All via environment (`.env`, see `.env.example`).
 | `SYNC_RCLONE_TIMEOUT` | `900` | per-invocation timeout |
 | `SYNC_INTERVAL` | `300` | seconds between sweeps |
 | `MIN_AGE` | `5m` | sweep ignores files younger than this |
-| `SMTP_*`, `MAIL_FROM`, `MAIL_TO` | — | msmtp settings for the sweep's reports |
+| `SMTP_*`, `MAIL_FROM`, `MAIL_TO` | — | email for sweep start, finish, and failure alerts |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | — | same notices on Telegram; skipped if either is empty |
 | `MAIL_SUBJECT_PREFIX` | `[replicator]` | subject prefix for those reports |
 | `LOG_FORMAT` | `json` | `json` for one object per line, `text` for `[<ISO-8601 UTC>] <component>: <message>` |
 

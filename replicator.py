@@ -9,7 +9,8 @@ place to configure:
     seconds of its transfer closing (see the Daemon docstring);
   - the sweep: every SYNC_INTERVAL, asks rclone which files the backup lacks,
     confirms each candidate with a direct stat, copies the real misses and
-    mails a report. That report is the signal that the event path dropped one.
+    notifies before those copies and again after. That notice is the signal
+    that the event path dropped one.
 
 Endpoints (POST, JSON body):
     /upload   {"path": "/<dir>/<file>"}
@@ -33,6 +34,7 @@ import sys
 import threading
 import time
 import zipfile
+import urllib.request
 from email.message import EmailMessage
 
 SRC = os.environ.get("SYNC_SRC", "/data/source")
@@ -402,6 +404,7 @@ class Sweep:
             return report
 
         self.fail_count = 0
+        pending = []
         for rel in sorted(set(missing) | set(differ)):
             local = os.path.join(self.daemon.src, rel)
             try:
@@ -419,6 +422,13 @@ class Sweep:
                 log("listing called it missing, a direct stat found it",
                     event="listing_artefact", path=rel, size=remote_size)
                 continue
+            pending.append((rel, local, local_size, remote_size))
+        if pending:
+            self.mailer.send(
+                "%s starting, %d file(s)" % (SUBJECT_PREFIX, len(pending)),
+                "Replication starting.\nAbout to copy: %d file(s)\nSource: %s\nTarget: %s\n"
+                % (len(pending), self.daemon.src, self.daemon.dest))
+        for rel, local, local_size, remote_size in pending:
             if self.runner.run(["copyto", local, self.daemon.remote(rel)]):
                 report.copied.append(rel)
                 log("copied", event="copied", path=rel,
@@ -429,24 +439,34 @@ class Sweep:
 
         report.elapsed = time.time() - started
         self.last_report = report
-        self._report(report)
+        self._report(report, announced=bool(pending))
         return report
 
-    def _report(self, report):
-        if not report.copied:
+    def _report(self, report, announced=False):
+        if not report.copied and not announced:
             log("sweep ok, nothing new to copy", event="sweep_done", files=0,
                 elapsed_s=round(report.elapsed, 1), listing_artefacts=report.artefacts,
                 failed=len(report.failed))
             return
+        if not report.copied:
+            self.mailer.send(
+                "%s finished, %d failed" % (SUBJECT_PREFIX, len(report.failed)),
+                "Replication finished.\nCopied: 0 file(s)\nFailed: %d\nSource: %s\nTarget: %s\n"
+                % (len(report.failed), self.daemon.src, self.daemon.dest))
+            log("copies failed, finish notice sent", event="sweep_done", files=0,
+                elapsed_s=round(report.elapsed, 1), failed=len(report.failed))
+            return
         blob, total = report.zip_bytes(self.daemon.src)
         body = ("Replication sweep OK.\n"
                 "Copied: %d file(s), %d bytes\n"
+                "Failed: %d\n"
                 "Source: %s\nTarget: %s\nElapsed: %.0fs\n\n"
                 "These files were NOT delivered by the event path, which is the normal\n"
                 "one -- the sweep only copies what it left behind, and each copy was\n"
                 "confirmed missing by a direct stat, not just by a directory listing.\n"
                 "To see what happened to one of them, filter the log for its name.\n"
-                % (len(report.copied), total, self.daemon.src, self.daemon.dest, report.elapsed))
+                % (len(report.copied), total, len(report.failed),
+                   self.daemon.src, self.daemon.dest, report.elapsed))
         self.mailer.send("%s %d file(s) copied" % (SUBJECT_PREFIX, len(report.copied)),
                          body, attachment=blob, filename="replication-report.zip")
         log("copied files the event path missed, report emailed", event="sweep_done",
@@ -481,7 +501,7 @@ class Sweep:
 # ---------------------------------------------------------------- mail
 
 class Mailer:
-    """SMTP over STARTTLS. Replaces msmtp, so nothing has to be apk-added."""
+    """SMTP plus Telegram. Each channel is skipped when it is not configured."""
 
     def __init__(self):
         self.host = os.environ.get("SMTP_HOST")
@@ -490,8 +510,14 @@ class Mailer:
         self.password = os.environ.get("SMTP_PASS")
         self.sender = os.environ.get("MAIL_FROM") or self.user
         self.to = os.environ.get("MAIL_TO")
+        self._opener = urllib.request.urlopen
 
     def send(self, subject, body, attachment=None, filename=None):
+        mailed = self._smtp(subject, body, attachment, filename)
+        tele = self._telegram(subject, body)
+        return mailed or tele
+
+    def _smtp(self, subject, body, attachment, filename):
         if not (self.host and self.to):
             log("no SMTP configured, not sending", level="warn", event="mail_skipped",
                 subject=subject)
@@ -516,6 +542,38 @@ class Mailer:
             return False
         log("mail sent", event="mail_sent", subject=subject)
         return True
+
+    def _telegram(self, subject, body):
+        token = os.environ.get("TELEGRAM_BOT_TOKEN")
+        chat = os.environ.get("TELEGRAM_CHAT_ID")
+        if not (token and chat):
+            log("no Telegram configured, not sending", level="warn", event="telegram_skipped",
+                subject=subject)
+            return False
+        try:
+            post_telegram(token, chat, subject + "\n\n" + body, opener=self._opener)
+        except OSError as exc:
+            log("sending telegram failed", level="error", event="telegram_error",
+                subject=subject, error=str(exc))
+            return False
+        log("telegram sent", event="telegram_sent", subject=subject)
+        return True
+
+
+def post_telegram(token, chat_id, text, opener=urllib.request.urlopen):
+    """POST sendMessage. Errors are re-raised with the bot token removed."""
+    if len(text) > 4096:
+        text = text[:4090] + "\n[cut]"
+    url = "https://api.telegram.org/bot%s/sendMessage" % token
+    payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
+    req = urllib.request.Request(url, data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with opener(req, timeout=30) as resp:
+            resp.read()
+    except Exception as exc:
+        raise OSError(str(exc).replace(token, "<token>")) from None
+    return True
 
 
 def make_handler(daemon, sweep=None):
